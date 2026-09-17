@@ -1,0 +1,21 @@
+# Compiled PDFs are published as GitHub Release assets, not tracked in git
+*.pdf
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local Claude Code / assistant config and instructions - not part of the course material
+CLAUDE.md
+.claude/
+
+# Local scratch / admin files not part of the lecture deliverables
+1.txt
+Moodle.txt
+
+# Python
+__pycache__/
+*.pyc
+
+# OS cruft
+.DS_Store
+Thumbs.db
