@@ -1,38 +1,28 @@
 #!/usr/bin/env python3
-"""
-Regenerate PDFs for the notebooks in this folder, and (re)configure Jupyter/
-nbconvert so that Cyrillic text renders correctly in PDF exports.
+"""Export the course notebooks to PDF (for GitHub Releases).
 
-Designed to be dropped into a fresh checkout of this course folder on any
-machine (Windows/macOS/Linux) and just run:
+The notebooks are exported as they are stored, with their saved outputs (nothing is re-executed —
+run `python tools/check_notebooks.py --inplace` first if figures changed):
 
-    python3 regenerate_pdfs.py
+* diagram cells (tag ``remove_input``) keep only their figure, the Python source is left out;
+* fenced code listings and self-check questions are drawn as framed boxes;
+* the lecture book's titlepage, table of contents and page numbering come from its raw-LaTeX cells;
+* emoji markers are removed (LaTeX text fonts have no glyphs for them).
 
-What it does, every time it runs:
-  1. Checks that xelatex and Jupyter/nbconvert are available (prints install
-     instructions per OS and stops if something required is missing).
-  2. Picks the best available Cyrillic-capable fonts on this machine.
-  3. Installs a small nbconvert template ("ukr_pdf") that layers Cyrillic
-     fonts, long-line wrapping in code cells, and emoji stripping (the emoji
-     used as decorative header markers in these notebooks don't exist in
-     regular LaTeX text fonts and would otherwise show up as tofu boxes) on
-     top of nbconvert's stock LaTeX template.
-  4. Points nbconvert's default config at that template, so BOTH
-     `jupyter nbconvert --to pdf ...` on the command line AND Jupyter
-     Notebook/Lab's own "Save and Export Notebook As -> PDF" menu use it
-     automatically, without extra flags.
-  5. Regenerates a PDF for every *.ipynb in this folder.
-
-Steps 1-4 are idempotent (safe to re-run) and only touch your Jupyter user
-profile (config dir / data dir) - never anything inside this project folder.
-Skip them with --skip-setup once a machine is already configured.
+Nothing outside this repository is changed: the nbconvert template is written to a temporary
+directory. Use --setup-jupyter to also install it into your Jupyter profile, so that
+"File -> Save and Export Notebook As -> PDF" in Jupyter uses the same Cyrillic-capable template.
 
 Usage:
-    python3 regenerate_pdfs.py                  # configure Jupyter + export all notebooks here
-    python3 regenerate_pdfs.py --setup-only      # only install the template/config, don't export
-    python3 regenerate_pdfs.py --skip-setup      # only export, assume setup already done
-    python3 regenerate_pdfs.py a.ipynb b.ipynb   # export only these notebooks (paths relative to CWD)
-    python3 regenerate_pdfs.py --check           # report what would happen, change nothing
+    python3 tools/regenerate_pdfs.py                     # all notebooks -> pdf/
+    python3 tools/regenerate_pdfs.py Lecture Lab_work_2  # only notebooks whose name contains one of these
+    python3 tools/regenerate_pdfs.py --out DIR           # another output directory
+    python3 tools/regenerate_pdfs.py --check             # only check that xelatex, LaTeX packages, fonts are installed
+    python3 tools/regenerate_pdfs.py --setup-jupyter     # install the template into the Jupyter profile and exit
+
+Requires xelatex with the fvextra, xurl, mdframed and fancyhdr packages, pandoc and the DejaVu fonts:
+    sudo apt install texlive-xetex texlive-latex-extra texlive-fonts-recommended pandoc fonts-dejavu
+    pip install nbconvert
 """
 
 from __future__ import annotations
@@ -43,9 +33,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE_NAME = "ukr_pdf"
 TEMPLATE_ENTRY = "uk_report.tex.j2"
 PREPROCESSOR_MODULE = "strip_emoji_preprocessor"
@@ -119,10 +111,14 @@ def pick_fonts() -> dict[str, str]:
 
 def check_prerequisites() -> list[str]:
     problems = []
-    if not have("jupyter"):
+    try:
+        import nbconvert  # noqa: F401
+    except ImportError:
+        problems.append("Python package `nbconvert` not installed.\n    Install with: pip install nbconvert")
+    if not have("pandoc"):
         problems.append(
-            "`jupyter` not found on PATH.\n"
-            "    Install with: pip install jupyter nbconvert"
+            "`pandoc` not found on PATH (nbconvert converts markdown cells with it).\n"
+            "    Debian/Ubuntu: sudo apt install pandoc    macOS: brew install pandoc    Windows: pandoc.org/installing"
         )
     if not have("xelatex"):
         problems.append(
@@ -285,17 +281,8 @@ def install_template(fonts: dict[str, str], check_only: bool) -> Path:
     data_dir = jupyter_path("data-dir")
     tmpl_dir = data_dir / "nbconvert" / "templates" / TEMPLATE_NAME
     print(f"  template dir: {tmpl_dir}")
-    if check_only:
-        return tmpl_dir
-    tmpl_dir.mkdir(parents=True, exist_ok=True)
-
-    conf = {
-        "base_template": "latex",
-        "mimetypes": {"text/latex": True, "text/tex": True, "application/pdf": True},
-    }
-    (tmpl_dir / "conf.json").write_text(json.dumps(conf, indent=2), encoding="utf-8")
-    (tmpl_dir / TEMPLATE_ENTRY).write_text(template_source(fonts), encoding="utf-8")
-    (tmpl_dir / f"{PREPROCESSOR_MODULE}.py").write_text(PREPROCESSOR_SOURCE, encoding="utf-8")
+    if not check_only:
+        write_template(tmpl_dir, fonts)
     return tmpl_dir
 
 
@@ -362,7 +349,7 @@ def setup_cyrillic_pdf_export(check_only: bool = False) -> bool:
         for p in problems:
             print(f"  - {p}\n")
         return False
-    print("  OK: jupyter, xelatex, fvextra all found.\n")
+    print("  OK: nbconvert, pandoc, xelatex and LaTeX packages found.\n")
 
     print("== Picking Cyrillic-capable fonts ==")
     fonts = pick_fonts()
@@ -380,70 +367,94 @@ def setup_cyrillic_pdf_export(check_only: bool = False) -> bool:
     return True
 
 
-def find_notebooks(explicit, folder: Path) -> list[Path]:
-    if explicit:
-        return [Path(p) for p in explicit]
-    notebooks = sorted(
-        p for p in folder.glob("*.ipynb") if ".ipynb_checkpoints" not in p.parts
-    )
-    return notebooks
+def write_template(tmpl_dir: Path, fonts: dict[str, str]) -> None:
+    """The template + emoji preprocessor, as a self-contained nbconvert template directory."""
+    tmpl_dir.mkdir(parents=True, exist_ok=True)
+    conf = {
+        "base_template": "latex",
+        "mimetypes": {"text/latex": True, "text/tex": True, "application/pdf": True},
+    }
+    (tmpl_dir / "conf.json").write_text(json.dumps(conf, indent=2), encoding="utf-8")
+    (tmpl_dir / TEMPLATE_ENTRY).write_text(template_source(fonts), encoding="utf-8")
+    (tmpl_dir / f"{PREPROCESSOR_MODULE}.py").write_text(PREPROCESSOR_SOURCE, encoding="utf-8")
 
 
-def export_pdf(nb_path: Path, out_dir: Path) -> tuple[bool, str]:
-    cmd = [
-        sys.executable, "-m", "jupyter", "nbconvert", "--to", "pdf",
-        str(nb_path), "--output-dir", str(out_dir),
-    ]
-    result = run(cmd)
-    ok = result.returncode == 0 and (out_dir / (nb_path.stem + ".pdf")).exists()
-    log = result.stderr if not ok else ""
-    return ok, log
+def make_exporter(template_base: Path):
+    from nbconvert import PDFExporter
+    from traitlets.config import Config
+
+    sys.path.insert(0, str(template_base / TEMPLATE_NAME))
+    c = Config()
+    c.PDFExporter.extra_template_basedirs = [str(template_base)]
+    c.PDFExporter.template_name = TEMPLATE_NAME
+    c.PDFExporter.template_file = TEMPLATE_ENTRY
+    c.TagRemovePreprocessor.enabled = True
+    c.TagRemovePreprocessor.remove_input_tags = {"remove_input"}
+    exporter = PDFExporter(config=c)
+    exporter.register_preprocessor(f"{PREPROCESSOR_MODULE}.{PREPROCESSOR_CLASS}", enabled=True)
+    return exporter
 
 
-def regenerate_pdfs(notebooks: list[Path], out_dir: Path) -> int:
-    if not notebooks:
-        print("No notebooks found to export.")
-        return 1
-    print(f"== Exporting {len(notebooks)} notebook(s) to PDF ==")
-    failures = []
-    for nb in notebooks:
-        print(f"  {nb.name} ... ", end="", flush=True)
-        ok, log = export_pdf(nb, out_dir)
-        if ok:
-            print("done")
-        else:
-            print("FAILED")
-            failures.append((nb, log))
-    if failures:
-        print(f"\n{len(failures)} notebook(s) failed:")
-        for nb, log in failures:
-            print(f"\n--- {nb.name} ---")
-            print(log[-2000:] if log else "(no error output captured)")
-        return 1
-    print("\nAll notebooks exported successfully.")
-    return 0
+def export_pdf(exporter, nb_path: Path, out_dir: Path) -> Path:
+    import nbformat
+
+    nb = nbformat.read(nb_path, as_version=4)
+    body, _ = exporter.from_notebook_node(
+        nb, resources={"metadata": {"path": str(nb_path.parent), "name": nb_path.stem}})
+    out = out_dir / (nb_path.stem + ".pdf")
+    out.write_bytes(body)
+    return out
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("notebooks", nargs="*", help="specific .ipynb files to export (default: all in this folder)")
-    parser.add_argument("--setup-only", action="store_true", help="only configure Jupyter, don't export PDFs")
-    parser.add_argument("--skip-setup", action="store_true", help="only export PDFs, assume setup already done")
-    parser.add_argument("--check", action="store_true", help="report what would happen, change nothing")
+    parser.add_argument("only", nargs="*", help="export only notebooks whose file name contains one of these strings")
+    parser.add_argument("--out", default=str(ROOT / "pdf"), help="output directory (default: pdf/)")
+    parser.add_argument("--check", action="store_true", help="only check the prerequisites")
+    parser.add_argument("--setup-jupyter", action="store_true",
+                        help="install the template into the Jupyter profile (for 'Export as PDF' in Jupyter) and exit")
     args = parser.parse_args()
 
-    script_dir = Path(__file__).resolve().parent
+    if args.setup_jupyter:
+        return 0 if setup_cyrillic_pdf_export() else 1
 
-    if not args.skip_setup:
-        ok = setup_cyrillic_pdf_export(check_only=args.check)
-        if not ok:
-            return 1
-
-    if args.setup_only or args.check:
+    print("== Checking prerequisites ==")
+    problems = check_prerequisites()
+    if problems:
+        print("Missing prerequisites - install these first, then re-run this script:\n")
+        for p in problems:
+            print(f"  - {p}\n")
+        return 1
+    fonts = pick_fonts()
+    print(f"  OK. Fonts: {fonts['main']} / {fonts['sans']} / {fonts['mono']}\n")
+    if args.check:
         return 0
 
-    notebooks = find_notebooks(args.notebooks, script_dir)
-    return regenerate_pdfs(notebooks, script_dir)
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    notebooks = sorted(p for p in ROOT.glob("*.ipynb"))
+    if args.only:
+        notebooks = [p for p in notebooks if any(s in p.name for s in args.only)]
+    if not notebooks:
+        print("No notebooks found to export.")
+        return 1
+
+    print(f"== Exporting {len(notebooks)} notebook(s) to {out_dir} ==")
+    failures = []
+    with tempfile.TemporaryDirectory() as tmp:
+        write_template(Path(tmp) / TEMPLATE_NAME, fonts)
+        exporter = make_exporter(Path(tmp))
+        for nb in notebooks:
+            print(f"  {nb.name} ... ", end="", flush=True)
+            try:
+                export_pdf(exporter, nb, out_dir)
+                print("done")
+            except Exception as e:  # noqa: BLE001 - report and go on with the others
+                print("FAILED")
+                failures.append((nb, e))
+    for nb, e in failures:
+        print(f"\n--- {nb.name} ---\n{str(e)[-3000:]}")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
-# Compiled PDFs are published as GitHub Release assets, not tracked in git
+# Compiled PDFs are published as GitHub Release assets (tools/regenerate_pdfs.py), not tracked in git
+pdf/
 *.pdf
 
 # Jupyter

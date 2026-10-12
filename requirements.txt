@@ -1,0 +1,7 @@
+#
+# Python dependencies of the lecture book (versions pinned to the environment it is tested with)
+#
+
+matplotlib==3.10.8
+numpy==2.4.4
+schemdraw==0.23
